@@ -1,0 +1,557 @@
+Groupe de travail réseau    
+
+
+Billal MECHEKOUR
+Iskander ROMDHANE
+Université de Picardie Jules Verne
+Mars 2026
+
+
+        Extension du protocole TFTP — Option bigfile 
+
+Statut de ce document
+
+   Ce document est un RFC étudiant produit dans le cadre du projet SAE
+   Réseau à l'Université de Picardie Jules Verne (UPJV), année
+   universitaire 2025-2026. Il décrit une extension du protocole TFTP
+   permettant le transfert de fichiers de taille arbitraire, sans la
+   limitation imposée par le champ numéro de bloc codé sur 16 bits.
+
+   Ce document étend TFTP tel que défini dans la RFC 1350 et utilise
+   le mécanisme de négociation d'options défini dans la RFC 2347.
+
+Notice de droit d'auteur
+
+   Copyright (c) 2026 Billal MECHEKOUR et Iskander ROMDHANE.
+   Tous droits réservés.
+
+Résumé
+
+   Le Trivial File Transfer Protocol (TFTP), tel que défini dans la
+   RFC 1350, utilise un numéro de bloc sur 16 bits, ce qui limite la
+   taille maximale du fichier transférable à 65535 × 512 =
+   33 553 920 octets (environ 32 Mo). Ce document définit l'option
+   "bigfile" pour TFTP, qui active le mécanisme de bouclage (rollover)
+   du numéro de bloc et permet ainsi le transfert de fichiers de taille
+   arbitraire, tout en restant rétrocompatible avec les implémentations
+   TFTP standard.
+
+Table des matières
+
+    1.  Introduction .................................................  2
+    2.  Conventions ..................................................  2
+    3.  L'option bigfile .............................................  3
+        3.1.  Format de l'option ....................................  3
+        3.2.  Mécanisme de rollover du numéro de bloc ...............  3
+        3.3.  Détection de fin de transfert .........................  4
+    4.  Déroulement du protocole ....................................  4
+        4.1.  Requête de lecture (RRQ) avec bigfile .................  4
+        4.2.  Requête d'écriture (WRQ) avec bigfile .................  5
+    5.  Négociation des options .....................................  5
+        5.1.  Envoi des options par le client .......................  5
+        5.2.  Acceptation des options par le serveur (OACK) .........  6
+        5.3.  Refus des options par le serveur ......................  6
+    6.  Concurrence et verrouillage des fichiers ....................  6
+        6.1.  Énoncé du problème ....................................  6
+        6.2.  Politique de verrouillage lecture/écriture ............  7
+        6.3.  Interaction avec plusieurs clients ....................  7
+    7.  Gestion des erreurs .........................................  8
+    8.  Considérations de sécurité ..................................  8
+    9.  Interopérabilité ............................................  9
+   10.  Considérations IANA .........................................  9
+   11.  Références ...................................................  9
+   12.  Adresses des auteurs ........................................  10
+
+
+1.  Introduction
+
+   Le Trivial File Transfer Protocol [RFC1350] est un protocole simple
+   de transfert de fichiers fonctionnant sur UDP. En raison de sa
+   simplicité, TFTP a été largement utilisé pour l'amorçage des
+   systèmes (démarrage PXE), le chargement de micrologiciels et le
+   transfert de fichiers de configuration.
+
+   Le champ numéro de bloc de TFTP est codé sur 16 bits, ce qui
+   autorise des numéros de bloc de 1 à 65535. Avec la taille de bloc
+   standard de 512 octets, la taille maximale du fichier transférable
+   est :
+
+       65535 × 512 = 33 553 920 octets (≈ 32 Mo)
+
+   Les cas d'usage modernes nécessitent fréquemment le transfert de
+   fichiers dépassant cette limite (images de micrologiciel, images
+   disque, fichiers journaux volumineux). La RFC 2348 permet de
+   négocier une taille de bloc plus grande (jusqu'à 65464 octets),
+   repoussant la limite à environ 4 Go, mais au prix d'une complexité
+   d'implémentation accrue.
+
+   Ce document définit l'option "bigfile", une alternative plus simple
+   qui active le mécanisme de rollover du numéro de bloc, permettant
+   au compteur de bloc de passer de 65535 à 0, puis de continuer à
+   partir de 1. Ce mécanisme permet le transfert de fichiers de taille
+   pratiquement illimitée avec des modifications minimales des
+   implémentations existantes.
+
+
+2.  Conventions
+
+   Les mots-clés « DOIT » (MUST), « NE DOIT PAS » (MUST NOT),
+   « REQUIS » (REQUIRED), « DEVRA » (SHALL), « NE DEVRA PAS »
+   (SHALL NOT), « DEVRAIT » (SHOULD), « NE DEVRAIT PAS »
+   (SHOULD NOT), « RECOMMANDÉ » (RECOMMENDED), « PEUT » (MAY) et
+   « OPTIONNEL » (OPTIONAL) dans ce document doivent être interprétés
+   comme décrit dans la RFC 2119.
+
+   Les abréviations suivantes sont utilisées :
+
+      RRQ    - Requête de lecture (opcode 1, RFC 1350)
+      WRQ    - Requête d'écriture (opcode 2, RFC 1350)
+      DATA   - Paquet de données (opcode 3, RFC 1350)
+      ACK    - Paquet d'acquittement (opcode 4, RFC 1350)
+      ERROR  - Paquet d'erreur (opcode 5, RFC 1350)
+      OACK   - Acquittement d'option (opcode 6, RFC 2347)
+      TID    - Identifiant de transfert (port UDP éphémère)
+
+
+3.  L'option bigfile
+
+3.1.  Format de l'option
+
+   L'option "bigfile" DOIT être incluse dans le paquet RRQ ou WRQ
+   selon le format de négociation d'options défini dans la RFC 2347.
+
+   Nom de l'option  : bigfile
+   Valeur           : "1"
+
+   L'option est incluse dans le paquet de requête comme suit :
+
+   2 octets  chaîne  1 octet  chaîne  1 octet  chaîne   1 octet  chaîne  1 octet
+   +--------+--------+-------+--------+-------+---------+-------+-------+-------+
+   | Opcode | Nom    |  \0   |  Mode  |  \0   | bigfile |  \0   |   1   |  \0   |
+   +--------+--------+-------+--------+-------+---------+-------+-------+-------+
+
+   Exemple (RRQ avec bigfile) :
+       Opcode   = 1 (RRQ)
+       Nom      = "large_image.bin"
+       Mode     = "octet"
+       Option   = "bigfile"
+       Valeur   = "1"
+
+   Seule la valeur "1" est définie. Toute autre valeur DOIT être
+   traitée comme une erreur par le serveur, qui DEVRAIT répondre par
+   un paquet ERROR (code d'erreur 0, erreur non définie).
+
+3.2.  Mécanisme de rollover du numéro de bloc
+
+   Lorsque l'option bigfile est négociée, le client et le serveur
+   DOIVENT implémenter le mécanisme de rollover. Le format des numéros
+   de bloc sur le réseau reste sur 16 bits (conformément à la
+   RFC 1350). Cependant, les deux parties maintiennent en interne un
+   compteur logique sur 32 bits.
+
+   La relation entre le numéro de bloc logique (block32) et le numéro
+   de bloc transmis sur le réseau (block_wire) est :
+
+       block_wire = block32 MOD 65536
+                  = block32 ET 0xFFFF
+
+   La séquence des numéros sur le réseau lors d'un rollover est :
+
+       ..., 65533, 65534, 65535, 0, 1, 2, ...
+
+   Remarque : Le bloc 0 sur le réseau (après le rollover) correspond
+   au bloc logique 65536. Il ne doit pas être confondu avec l'ACK(0)
+   initial envoyé par le serveur en réponse à un WRQ.
+
+   Les implémentations NE DOIVENT PAS utiliser le seul numéro de bloc
+   16 bits pour détecter les paquets dupliqués après le premier
+   rollover. Elles DOIVENT utiliser le compteur logique 32 bits pour
+   distinguer le bloc courant des doublons, selon la règle suivante :
+
+   Un bloc reçu avec le numéro réseau B est considéré comme :
+   - Le bloc ATTENDU   si : B == (expected32 ET 0xFFFF)
+   - Un DOUBLON        si : B == ((expected32 - 1) ET 0xFFFF)
+   - HORS SÉQUENCE sinon (DOIT être ignoré)
+
+3.3.  Détection de fin de transfert
+
+   Le mécanisme de détection de fin de transfert est INCHANGÉ par
+   rapport à la RFC 1350 :
+
+      Un paquet DATA dont la charge utile est strictement inférieure
+      à 512 octets indique le dernier bloc du transfert.
+
+   Si la taille du fichier est un multiple exact de 512 octets,
+   l'émetteur DOIT envoyer un paquet DATA final avec une charge utile
+   de 0 octet, suivi de l'ACK correspondant. Ce comportement est
+   identique à celui du TFTP standard.
+
+   L'option bigfile NE MODIFIE PAS le mécanisme de détection de fin
+   de transfert.
+
+
+4.  Déroulement du protocole
+
+4.1.  Requête de lecture (RRQ) avec bigfile
+
+   Le diagramme suivant illustre un RRQ avec bigfile pour un fichier
+   dépassant 32 Mo (plus de 65535 blocs) :
+
+       Client                                        Serveur
+         |                                              |
+         |-- RRQ("fichier","octet","bigfile","1") ----->|
+         |                                              |
+         |<----- OACK("bigfile","1") ------------------|
+         |                                              |
+         |-- ACK(0) ----------------------------------->|
+         |                                              |
+         |<----- DATA(1, 512 octets) ------------------|
+         |-- ACK(1) ----------------------------------->|
+         |             ...                              |
+         |<----- DATA(65535, 512 octets) --------------|
+         |-- ACK(65535) -------------------------------->|
+         |                                              |
+         |<----- DATA(0, 512 octets) [block32=65536] --|
+         |-- ACK(0) ----------------------------------->|  <- rollover !
+         |                                              |
+         |<----- DATA(1, 512 octets) [block32=65537] --|
+         |-- ACK(1) ----------------------------------->|
+         |             ...                              |
+         |<----- DATA(N, <512 octets) [dernier bloc] --|
+         |-- ACK(N) ----------------------------------->|
+
+   Important : ACK(0) apparaît deux fois dans ce diagramme avec des
+   significations différentes. Le premier ACK(0) (après le OACK)
+   acquitte la négociation des options. Le second ACK(0) (après DATA
+   avec block32=65536) acquitte le paquet DATA du rollover. Les deux
+   parties DOIVENT utiliser leur compteur logique 32 bits pour
+   interpréter correctement le contexte.
+
+4.2.  Requête d'écriture (WRQ) avec bigfile
+
+       Client                                        Serveur
+         |                                              |
+         |-- WRQ("fichier","octet","bigfile","1") ----->|
+         |                                              |
+         |<----- OACK("bigfile","1") ------------------|
+         |                                              |
+         |-- DATA(1, 512 octets) ---------------------->|
+         |<----- ACK(1) -------------------------------|
+         |             ...                              |
+         |-- DATA(65535, 512 octets) ------------------>|
+         |<----- ACK(65535) ---------------------------|
+         |                                              |
+         |-- DATA(0, 512 octets) [block32=65536] ------->|  <- rollover !
+         |<----- ACK(0) -------------------------------|
+         |             ...                              |
+         |-- DATA(N, <512 octets) [dernier bloc] ------->|
+         |<----- ACK(N) -------------------------------|
+
+   Remarque : Pour un WRQ, le OACK remplace l'ACK(0) initial envoyé
+   dans le TFTP standard. Le client DOIT commencer à envoyer DATA(1)
+   immédiatement après réception du OACK, sans attendre un ACK(0)
+   séparé.
+
+
+5.  Négociation des options
+
+5.1.  Envoi des options par le client
+
+   Le client inclut l'option "bigfile" dans le paquet RRQ ou WRQ
+   initial. L'option DOIT être placée après le champ mode, selon le
+   format spécifié dans la RFC 2347.
+
+   Exemple de paquet RRQ (représentation octets) :
+       00 01                          ; Opcode = RRQ
+       6c 61 72 67 65 2e 62 69 6e 00  ; "large.bin\0"
+       6f 63 74 65 74 00              ; "octet\0"
+       62 69 67 66 69 6c 65 00        ; "bigfile\0"
+       31 00                          ; "1\0"
+
+5.2.  Acceptation des options par le serveur (OACK)
+
+   Si le serveur supporte l'option bigfile, il DOIT répondre par un
+   paquet OACK contenant l'option confirmée.
+
+   Exemple de paquet OACK :
+       00 06                          ; Opcode = OACK
+       62 69 67 66 69 6c 65 00        ; "bigfile\0"
+       31 00                          ; "1\0"
+
+   Après réception du OACK :
+   - Pour RRQ : le client DOIT envoyer ACK(0) pour déclencher le
+     transfert.
+   - Pour WRQ : le client DOIT envoyer DATA(1) immédiatement.
+
+   Le serveur DOIT utiliser les options confirmées pendant toute la
+   durée du transfert.
+
+5.3.  Refus des options par le serveur
+
+   Un serveur ne supportant pas l'option bigfile NE DOIT PAS envoyer
+   de OACK. À la place :
+
+   - Pour RRQ : le serveur envoie directement DATA(1).
+   - Pour WRQ : le serveur envoie directement ACK(0).
+
+   Dans ce cas, le client DOIT poursuivre avec le protocole TFTP
+   standard, sans rollover du numéro de bloc. Si le fichier dépasse
+   32 Mo, le transfert sera corrompu ou tronqué. Le client DEVRAIT
+   avertir l'utilisateur dans ce cas.
+
+   Si le serveur rencontre une condition de rollover sur un client qui
+   n'a PAS négocié bigfile, le comportement est indéfini. Le serveur
+   DEVRAIT envoyer un paquet ERROR et mettre fin au transfert.
+
+
+6.  Concurrence et verrouillage des fichiers
+
+6.1.  Énoncé du problème
+
+   Dans un serveur TFTP multi-clients, les accès simultanés au même
+   fichier peuvent provoquer une corruption des données. Les scénarios
+   suivants sont problématiques :
+
+   a) Lectures et écritures simultanées (RRQ pendant un WRQ) :
+      Un client qui lit un fichier pendant qu'un autre client l'écrit
+      peut recevoir des données incomplètes ou corrompues, car le
+      fichier peut n'être que partiellement écrit sur le disque.
+
+   b) Écritures simultanées (deux WRQ sur le même fichier) :
+      Deux clients téléversant simultanément vers le même nom de
+      fichier provoqueront un entrelacement de données ou un
+      comportement indéfini, résultant en un fichier corrompu sur le
+      serveur.
+
+   c) Condition de concurrence TOCTOU (Time-of-Check-Time-of-Use) :
+      Vérifier l'existence d'un fichier puis le créer en deux
+      opérations séparées introduit une condition de concurrence où
+      deux clients peuvent tous deux passer la vérification et tenter
+      ensuite de créer le fichier simultanément.
+
+   Ces problèmes sont amplifiés pour les transferts bigfile, qui
+   durent beaucoup plus longtemps que les transferts de petits
+   fichiers. Un transfert bigfile de plusieurs gigaoctets peut prendre
+   plusieurs minutes, pendant lesquelles le risque d'accès concurrent
+   est bien plus élevé.
+
+6.2.  Politique de verrouillage lecture/écriture
+
+   Les implémentations de l'option bigfile DEVRAIENT mettre en œuvre
+   la politique de verrouillage suivante pour le contrôle des accès
+   concurrents :
+
+   Verrou en lecture (partagé) :
+      Acquis lors du traitement d'un RRQ (requête de lecture).
+      Plusieurs lecteurs simultanés sur le même fichier sont AUTORISÉS.
+      Un lecteur DOIT se bloquer si un verrou en écriture est
+      actuellement détenu.
+
+   Verrou en écriture (exclusif) :
+      Acquis lors du traitement d'un WRQ (requête d'écriture).
+      Un seul rédacteur à la fois est AUTORISÉ par fichier.
+      Un verrou en écriture DOIT bloquer tous les autres lecteurs et
+      rédacteurs.
+
+   Le verrou DOIT être maintenu pendant TOUTE LA DURÉE du transfert,
+   et pas seulement lors des opérations d'ouverture/fermeture du
+   fichier. Cela garantit qu'un lecteur n'observe pas un fichier
+   partiellement écrit.
+
+   L'implémentation recommandée utilise un verrou lecteur-rédacteur
+   par nom de fichier (pthread_rwlock_t sur les systèmes POSIX), avec
+   une table globale associant les noms de fichiers à leurs verrous
+   respectifs.
+
+6.3.  Interaction avec plusieurs clients
+
+   Les scénarios suivants DOIVENT être traités correctement :
+
+   Scénario A : Deux clients effectuent un RRQ sur le même fichier
+               volumineux :
+      Les deux clients acquièrent des verrous READ simultanément.
+      Les deux transferts se déroulent en parallèle sans interférence.
+      Résultat : AUTORISÉ et CORRECT.
+
+   Scénario B : Deux clients effectuent un WRQ sur le même nom de
+               fichier :
+      Le premier client acquiert le verrou WRITE et commence le
+      transfert. Le second client tente d'acquérir un verrou WRITE et
+      est bloqué. Le serveur DEVRAIT répondre immédiatement au second
+      client par ERROR (code 6, "Fichier existant") plutôt que de
+      bloquer indéfiniment, afin d'éviter un délai d'expiration du TID
+      côté client.
+      Résultat : Le PREMIER réussit, le SECOND reçoit ERROR
+      "Fichier existant".
+
+   Scénario C : Un client effectue un WRQ pendant qu'un autre effectue
+               un RRQ sur le même fichier :
+      Si le RRQ arrive en premier, le verrou READ est acquis. Le
+      client WRQ est bloqué jusqu'à la fin de toutes les lectures. Si
+      le WRQ arrive en premier, le verrou WRITE est acquis. Le client
+      RRQ est bloqué jusqu'à la fin de l'écriture.
+      Résultat : SÉRIALISÉ, données COHÉRENTES transmises au lecteur.
+
+   Scénario D : Plusieurs clients accèdent à des fichiers DIFFÉRENTS
+               simultanément :
+      Chaque fichier possède son propre verrou indépendant. Il n'y a
+      aucune interférence entre les transferts portant sur des noms de
+      fichiers différents.
+      Résultat : ENTIÈREMENT PARALLÈLE, aucun blocage.
+
+
+7.  Gestion des erreurs
+
+   Les conditions d'erreur suivantes sont spécifiques à l'option
+   bigfile :
+
+   Valeur d'option invalide :
+      Si la valeur de l'option bigfile n'est pas "1", le serveur DOIT
+      répondre par ERROR (code 0, erreur non définie) avec un message
+      approprié tel que "Valeur d'option bigfile invalide".
+
+   Limite de taille de fichier :
+      Aucune limite de taille de fichier n'est imposée par cette
+      option. Cependant, les limitations d'espace disque sur le
+      serveur PEUVENT provoquer l'échec du transfert. Dans ce cas, le
+      serveur DOIT envoyer ERROR (code 3, "Disque plein ou allocation
+      dépassée").
+
+   Confusion au rollover :
+      Si une implémentation non conforme à bigfile reçoit un paquet
+      DATA avec le numéro de bloc 0 (après rollover) lors d'un
+      transfert en cours, elle PEUT interpréter incorrectement ce
+      paquet comme une erreur ou un paquet hors séquence. Pour cette
+      raison, bigfile NE DOIT être utilisé que lorsqu'il est
+      explicitement négocié par les deux parties via la négociation
+      d'options RFC 2347.
+
+   Interruption du transfert :
+      Si un transfert bigfile est interrompu (déconnexion du client,
+      délai d'expiration), le serveur DOIT libérer le verrou fichier
+      et supprimer tout fichier partiellement écrit. Les fichiers
+      partiels NE DEVRAIENT PAS être conservés sur le système de
+      fichiers du serveur.
+
+
+8.  Considérations de sécurité
+
+   Traversée de répertoire (Path Traversal) :
+      L'option bigfile n'introduit pas de nouvelles surfaces d'attaque
+      liées aux noms de fichiers. Les implémentations DOIVENT
+      continuer à valider les noms de fichiers pour prévenir les
+      attaques par traversée de répertoire (en rejetant les noms
+      contenant "..", les chemins absolus ou les séparateurs de
+      chemin).
+
+   Épuisement des ressources :
+      Les transferts bigfile consomment les ressources du serveur
+      (disque, CPU, réseau) pendant des durées potentiellement
+      prolongées. Les implémentations serveur DEVRAIENT mettre en
+      œuvre des limites de transfert, telles que :
+      - Nombre maximum de transferts simultanés
+      - Durée maximale de transfert (délai global)
+      - Taille maximale de fichier (configurable)
+
+   Attaques par rejeu :
+      TFTP fonctionnant sur UDP sans authentification, un attaquant
+      peut tenter d'injecter de faux paquets DATA ou ACK. Le mécanisme
+      TID (port éphémère par transfert, RFC 1350 section 4) offre une
+      protection limitée. Une sécurité supplémentaire au niveau de la
+      couche transport (par exemple, DTLS) est RECOMMANDÉE pour les
+      environnements sensibles.
+
+   Déni de service :
+      Un client malveillant pourrait initier un grand nombre de
+      transferts bigfile afin d'épuiser l'espace disque ou les
+      descripteurs de fichiers. Les implémentations serveur DEVRAIENT
+      surveiller et limiter l'utilisation des ressources par client.
+
+
+9.  Interopérabilité
+
+   L'option bigfile est conçue pour être entièrement rétrocompatible
+   avec les implémentations TFTP standard :
+
+   - Un client compatible bigfile communiquant avec un serveur standard
+     qui ignore l'option recevra DATA(1) directement (pour RRQ) ou
+     ACK(0) directement (pour WRQ). Le client DOIT basculer en mode
+     TFTP standard dans ce cas.
+
+   - Un serveur compatible bigfile recevant un RRQ ou WRQ sans
+     l'option bigfile DOIT se comporter comme un serveur RFC 1350
+     standard, avec la limitation de taille de fichier à 32 Mo.
+
+   - Les implémentations supportant à la fois l'option bigfile
+     (ce document) et l'option windowsize (RFC 7440) DEVRAIENT
+     permettre la négociation simultanée des deux options. Lorsqu'elles
+     sont combinées, le rollover et la transmission par fenêtre
+     s'appliquent conjointement.
+
+
+10.  Considérations IANA
+
+   Ce document définit un nouveau nom d'option TFTP : "bigfile".
+
+   Dans un déploiement en production, ce nom d'option serait
+   enregistré auprès de l'IANA dans le registre "TFTP Option Names"
+   établi par la RFC 2347. Dans le cadre de ce projet académique,
+   aucun enregistrement formel auprès de l'IANA n'est demandé.
+
+
+11.  Références
+
+Références normatives
+
+   [RFC1350]  Sollins, K., « THE TFTP PROTOCOL (REVISION 2) »,
+              STD 33, RFC 1350, juillet 1992.
+
+   [RFC2347]  Malkin, G. et A. Harkin, « TFTP Option Extension »,
+              RFC 2347, mai 1998.
+
+   [RFC2348]  Malkin, G. et A. Harkin, « TFTP Blocksize Option »,
+              RFC 2348, mai 1998.
+
+   [RFC7440]  Masotta, P., « TFTP Windowsize Option »,
+              RFC 7440, janvier 2015.
+
+   [RFC2119]  Bradner, S., « Key words for use in RFCs to Indicate
+              Requirement Levels », BCP 14, RFC 2119, mars 1997.
+
+Références informatives
+
+   [RFC1350]  Sollins, K., « THE TFTP PROTOCOL (REVISION 2) »,
+              RFC 1350, juillet 1992.
+
+   [RFC2119]  Bradner, S., « Key words for use in RFCs to Indicate
+              Requirement Levels », RFC 2119, mars 1997.
+
+
+12.  Adresses des auteurs
+
+   Billal MECHEKOUR
+   Université de Picardie Jules Verne
+   IUT de l'Oise
+   Amiens, France
+   Courriel : billal.mechekour@etud.u-picardie.fr
+
+   Iskander ROMDHANE
+   Université de Picardie Jules Verne
+   IUT de l'Oise
+   Amiens, France
+   Courriel : iskander.romdhane@etud.u-picardie.fr
+
+   Encadrant : Gil UTARD
+   Université de Picardie Jules Verne
+
+
+Déclaration complète de droits d'auteur
+
+   Ce document est un RFC académique étudiant produit à l'UPJV dans
+   le cadre du cours SAE Réseau, année universitaire 2025-2026. Il
+   respecte la structure et les conventions des RFC de l'IETF à des
+   fins pédagogiques.
+
+   La copie et la distribution de ce document sont autorisées à des
+   fins personnelles et pédagogiques, sous réserve que cette notice
+   soit conservée.
